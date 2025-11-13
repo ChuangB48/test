@@ -1,0 +1,159 @@
+#include <rcl/rcl.h>
+#include <rcl/error_handling.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+
+#include <std_msgs/msg/header.h>
+
+#include <stdio.h>
+#include <unistd.h>
+#include <time.h>
+
+#define STRING_BUFFER_LEN 100
+
+#define RCCHECK(fn)     { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Aborting.\n",__LINE__,(int)temp_rc); return 1;}}
+#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){printf("Failed status on line %d: %d. Continuing.\n",__LINE__,(int)temp_rc);}}
+
+// publisher and subscriber of rcl: https://micro.ros.org/docs/tutorials/programming_rcl_rclc/pub_sub/
+rcl_publisher_t ping_publisher;
+rcl_publisher_t pong_publisher;
+rcl_subscription_t ping_subscriber;
+rcl_subscription_t pong_subscriber;
+
+// micro-ROS message structure: https://micro.ros.org/docs/tutorials/advanced/handling_type_memory/
+std_msgs__msg__Header incoming_ping;
+std_msgs__msg__Header outcoming_ping;
+std_msgs__msg__Header incoming_pong;
+
+int device_id;
+int seq_no;
+int pong_count;
+
+void ping_timer_callback(rcl_timer_t * timer, int64_t last_call_time)
+{
+	(void) last_call_time;
+
+	if (timer != NULL) {
+
+		seq_no = rand();
+		sprintf(outcoming_ping.frame_id.data, "%d_%d", seq_no, device_id);
+		outcoming_ping.frame_id.size = strlen(outcoming_ping.frame_id.data);
+		
+		// Fill the message timestamp
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		outcoming_ping.stamp.sec = ts.tv_sec;
+		outcoming_ping.stamp.nanosec = ts.tv_nsec;
+
+		// Reset the pong count and publish the ping message
+		pong_count = 0;
+		RCSOFTCHECK(rcl_publish(&ping_publisher, (const void*)&outcoming_ping, NULL));
+		printf("Ping send seq %s\n", outcoming_ping.frame_id.data);  
+	}
+}
+
+void ping_subscription_callback(const void * msgin)
+{
+	const std_msgs__msg__Header * msg = (const std_msgs__msg__Header *)msgin;
+
+	// Dont pong my own pings
+	// rcl_publish: https://docs.ros.org/en/iron/p/rcl/generated/function_publisher_8h_1ab494cbdf535dd0fae6a508b38fce52ac.html
+	if(strcmp(outcoming_ping.frame_id.data, msg->frame_id.data) != 0){
+		printf("Ping received with seq %s. Answering.\n", msg->frame_id.data);
+		RCSOFTCHECK(rcl_publish(&pong_publisher, (const void*)msg, NULL));
+	}
+}
+
+
+void pong_subscription_callback(const void * msgin)
+{
+	const std_msgs__msg__Header * msg = (const std_msgs__msg__Header *)msgin;
+
+	if(strcmp(outcoming_ping.frame_id.data, msg->frame_id.data) == 0) {
+		pong_count++;
+		printf("Pong for seq %s (%d)\n", msg->frame_id.data, pong_count);
+	}
+}
+
+// micro-ROS jump start: https://docs.vulcanexus.org/en/iron/rst/microros_documentation/getting_started/getting_started.html#add-micro-ros-apps-to-the-workspace
+int main()
+{
+	// rcl_allocator_t: https://docs.ros2.org/beta1/api/rcl/structrcl__allocator__t.html
+	rcl_allocator_t allocator = rcl_get_default_allocator();
+
+	// rclc_support_t: 在建立節點之前，需要建立並初始化 rclc_support_t 物件。rclc_support_init 方法將處理 micro-ROS 初始配置（內存初始化、傳輸配置等）。
+	rclc_support_t support;
+
+	// create init_options, 失敗就結束
+	// https://docs.ros.org/en/iron/p/rclc/generated/function_init_8h_1a80aaca8f64919c827aa72a01ebab544d.html
+	RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+
+	// create node, 失敗就結束
+	// node init: https://docs.vulcanexus.org/en/iron/rst/microros_documentation/user_api/user_api_nodes.html
+	// https://docs.ros.org/en/humble/p/rclc/generated/function_node_8h_1a83ee36a6ff8e324912221409db3e0d75.html
+	rcl_node_t node;
+	RCCHECK(rclc_node_init_default(&node, "pingpong_node", "", &support));
+
+	// Create a reliable ping publisher, 失敗就結束
+	// https://docs.vulcanexus.org/en/iron/rst/microros_documentation/user_api/user_api_pub_sub.html
+	// https://docs.ros.org/en/humble/p/rclc/generated/function_publisher_8h_1a6294fe559943493c22cee164224ca5ee.html
+	RCCHECK(rclc_publisher_init_default(&ping_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Header), "/microROS/ping"));
+
+	// Create a best effort pong publisher, 失敗就結束
+	// https://docs.ros.org/en/humble/p/rclc/generated/function_publisher_8h_1ae8e3c85ab571751d8b8646871482bebe.html
+	RCCHECK(rclc_publisher_init_best_effort(&pong_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Header), "/microROS/pong"));
+
+	// Create a best effort ping subscriber, 失敗就結束
+	// https://docs.ros.org/en/humble/p/rclc/generated/function_subscription_8h_1ac7b2042897c45ea82ca917dedbc77058.html
+	RCCHECK(rclc_subscription_init_best_effort(&ping_subscriber, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Header), "/microROS/ping"));
+
+	// Create a best effort  pong subscriber, 失敗就結束
+	// https://docs.ros.org/en/humble/p/rclc/generated/function_subscription_8h_1ac7b2042897c45ea82ca917dedbc77058.html
+	RCCHECK(rclc_subscription_init_best_effort(&pong_subscriber, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Header), "/microROS/pong"));
+
+
+	// Create a 2 seconds ping timer timer, 2000ms 後執行 ping_timer_callback(), 失敗就結束
+	// https://docs.ros.org/en/humble/p/rclc/generated/function_timer_8h_1a3de0d74e4375d3baa31f2701bf274b5a.html
+	rcl_timer_t timer;
+	RCCHECK(rclc_timer_init_default(&timer, &support, RCL_MS_TO_NS(2000), ping_timer_callback));
+
+
+	// Create executor
+	// https://docs.ros.org/en/humble/p/rclc/generated/function_executor_8h_1ad26f01e361f15c4ca9c7613f8972ad6a.html
+	// rclc_executor_init: https://docs.ros.org/en/humble/p/rclc/generated/function_executor_8h_1a75cf702f074cea6b4e71f7259fa38efa.html
+	// rcl_context_t: https://docs.ros2.org/foxy/api/rcl/structrcl__context__t.html#details
+	// rclc_executor_add_subscription: https://docs.ros.org/en/humble/p/rclc/generated/function_executor_8h_1a00d7243a6b5a0473a6e25f5a0952ac5a.html
+	rclc_executor_t executor = rclc_executor_get_zero_initialized_executor();
+	RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
+	RCCHECK(rclc_executor_add_timer(&executor, &timer));
+	RCCHECK(rclc_executor_add_subscription(&executor, &ping_subscriber, &incoming_ping, &ping_subscription_callback, ON_NEW_DATA));
+	RCCHECK(rclc_executor_add_subscription(&executor, &pong_subscriber, &incoming_pong, &pong_subscription_callback, ON_NEW_DATA));
+
+	// Create and allocate the pingpong messages
+	char outcoming_ping_buffer[STRING_BUFFER_LEN];
+	outcoming_ping.frame_id.data = outcoming_ping_buffer;
+	outcoming_ping.frame_id.capacity = STRING_BUFFER_LEN;
+
+	char incoming_ping_buffer[STRING_BUFFER_LEN];
+	incoming_ping.frame_id.data = incoming_ping_buffer;
+	incoming_ping.frame_id.capacity = STRING_BUFFER_LEN;
+
+	char incoming_pong_buffer[STRING_BUFFER_LEN];
+	incoming_pong.frame_id.data = incoming_pong_buffer;
+	incoming_pong.frame_id.capacity = STRING_BUFFER_LEN;
+
+	device_id = rand();
+
+	// rclc_executor_spin: https://docs.ros.org/en/humble/p/rclc/generated/function_executor_8h_1ab263a92d91f8fad9e4b03bad48343925.html
+	rclc_executor_spin(&executor);
+
+	// rcl_publisher_fini: 停止發布; https://docs.ros.org/en/humble/p/rcl/generated/function_publisher_8h_1a4994e28119c12621e77a979f2d99fc8f.html
+	// rcl_subscription_fini: 停止訂閱; https://docs.ros.org/en/iron/p/rcl/generated/function_subscription_8h_1a8cf9ab2fea92c0df0a26fab96387a53d.html
+	// rcl_subscription_fini: 停止訂閱; https://docs.ros.org/en/iron/p/rcl/generated/function_subscription_8h_1a8cf9ab2fea92c0df0a26fab96387a53d.html
+	// rcl_node_fini: 安全地銷毀 node; https://docs.ros.org/en/iron/p/rcl/generated/function_node_8h_1a00d2a1a7959d7b2db49a3653235d414c.html
+	RCCHECK(rcl_publisher_fini(&ping_publisher, &node));
+	RCCHECK(rcl_publisher_fini(&pong_publisher, &node));
+	RCCHECK(rcl_subscription_fini(&ping_subscriber, &node));
+	RCCHECK(rcl_subscription_fini(&pong_subscriber, &node));
+	RCCHECK(rcl_node_fini(&node));
+}
