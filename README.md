@@ -31,13 +31,6 @@ git add file.name
 git commit -m "message"
 <br>
 git push origin
-#  帳密:
-<br>
-##  github:
-<br>
-帳號: CHuangB
-<br>
-密碼: akasa120537
 # 已提供
 指定參考文件 (考生應於試前閱讀之)
 <br>
